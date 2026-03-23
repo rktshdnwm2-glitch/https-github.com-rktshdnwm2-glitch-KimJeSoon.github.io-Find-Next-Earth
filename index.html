@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Find Next Earth</title>
+<style>
+:root{color-scheme:dark;}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+html,body{
+margin:0;
+padding:0;
+width:100%;
+height:100%;
+background:#000;
+color:#fff;
+font-family:Arial,sans-serif;
+overflow:hidden;
+touch-action:none;
+}
+body{position:fixed;inset:0;}
+canvas{display:none;position:fixed;inset:0;width:100vw;height:100vh;}
+#menu,
+#gameOverScreen{
+position:fixed;
+inset:0;
+display:flex;
+flex-direction:column;
+justify-content:center;
+align-items:center;
+text-align:center;
+padding:24px;
+background:radial-gradient(circle at center, rgba(30,30,50,.75), rgba(0,0,0,.95));
+z-index:20;
+}
+#gameOverScreen{display:none;}
+.title{font-size:clamp(30px,8vw,54px);margin:0 0 10px;}
+.subtitle{font-size:clamp(16px,4.5vw,24px);margin:0 0 24px;color:#c7d2ff;}
+.menuText{font-size:clamp(14px,4vw,18px);margin-bottom:10px;}
+.btnRow{display:flex;flex-wrap:wrap;justify-content:center;gap:12px;max-width:560px;}
+button{
+font-size:18px;
+padding:14px 22px;
+min-width:120px;
+border:none;
+border-radius:14px;
+cursor:pointer;
+background:#1f6feb;
+color:#fff;
+font-weight:700;
+box-shadow:0 6px 18px rgba(0,0,0,.28);
+}
+button.secondary{background:#2d333b;}
+#hud{
+display:none;
+position:fixed;
+top:0;
+left:0;
+right:0;
+padding:calc(env(safe-area-inset-top, 0px) + 12px) 14px 8px;
+z-index:10;
+pointer-events:none;
+font-size:clamp(16px,4vw,22px);
+font-weight:700;
+text-shadow:0 2px 8px rgba(0,0,0,.8);
+}
+#controls{
+display:none;
+position:fixed;
+left:0;
+right:0;
+bottom:0;
+padding:12px 16px calc(env(safe-area-inset-bottom, 0px) + 14px);
+z-index:12;
+display:flex;
+justify-content:space-between;
+gap:12px;
+pointer-events:none;
+}
+.ctrlGroup{display:flex;gap:12px;pointer-events:auto;}
+.ctrlBtn{
+width:min(24vw,110px);
+height:min(24vw,110px);
+border-radius:50%;
+background:rgba(255,255,255,.12);
+border:2px solid rgba(255,255,255,.25);
+backdrop-filter:blur(4px);
+font-size:min(12vw,42px);
+line-height:1;
+}
+.ctrlBtn:active{transform:scale(.97);}
+.note{max-width:560px;opacity:.8;font-size:14px;line-height:1.5;margin-top:14px;}
+</style>
+</head>
+<body>
+<div id="menu">
+  <h1 class="title">🌍 FIND NEXT EARTH</h1>
+  <h3 class="subtitle">Exploration Ship: SUPERNOVA</h3>
+  <p class="menuText">난이도를 선택하세요</p>
+  <div class="btnRow">
+    <button data-level="easy">Easy</button>
+    <button data-level="normal">Normal</button>
+    <button data-level="hard">Hard</button>
+  </div>
+  <p class="note">모바일에서 바로 열어도 플레이할 수 있도록 외부 이미지 의존성을 제거하고, 터치 컨트롤과 화면 회전 대응을 추가했습니다.</p>
+</div>
+
+<div id="gameOverScreen">
+  <h2 class="title" style="font-size:clamp(28px,7vw,46px);">MISSION FAILED</h2>
+  <p id="finalScore" class="subtitle"></p>
+  <div class="btnRow">
+    <button id="restartBtn">다시 시작</button>
+    <button id="menuBtn" class="secondary">메뉴로</button>
+  </div>
+</div>
+
+<div id="hud">Distance: 0 km | Laser: 0</div>
+<canvas id="game"></canvas>
+
+<div id="controls">
+  <div class="ctrlGroup">
+    <button class="ctrlBtn" id="leftBtn" aria-label="왼쪽">◀</button>
+    <button class="ctrlBtn" id="rightBtn" aria-label="오른쪽">▶</button>
+  </div>
+  <div class="ctrlGroup">
+    <button class="ctrlBtn" id="shootBtn" aria-label="레이저 발사">✦</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const menu = document.getElementById('menu');
+  const hud = document.getElementById('hud');
+  const controls = document.getElementById('controls');
+  const gameOverScreen = document.getElementById('gameOverScreen');
+  const finalScore = document.getElementById('finalScore');
+
+  let width = 0;
+  let height = 0;
+  let animationId = null;
+  let lastTime = 0;
+  let spawnTimer = 0;
+  let running = false;
+  let gameEnded = false;
+
+  const state = {
+    asteroidBaseSpeed: 220,
+    spawnRateMs: 1000,
+    score: 0,
+    elapsedMs: 0,
+    boss: null,
+    bossActive: false,
+    bossWarningVisible: false,
+    bossThreshold: 3000,
+    asteroids: [],
+    lasers: [],
+    explosions: [],
+    laserCharges: 0,
+    nextLaserMilestone: 10000,
+    stars: [],
+    keys: { left: false, right: false }
+  };
+
+  const ship = {
+    x: 0,
+    y: 0,
+    width: 72,
+    height: 88,
+    speed: 420
+  };
+
+  function resizeCanvas() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+    canvas.style.width = width + 'px';
+    canvas.style.height = height + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    ship.width = Math.max(58, Math.min(84, width * 0.12));
+    ship.height = ship.width * 1.15;
+    ship.y = height - Math.max(120, ship.height + 36 + getBottomControlPadding());
+    ship.x = Math.min(Math.max(ship.x || width / 2 - ship.width / 2, 0), width - ship.width);
+
+    if (!state.stars.length) initStars();
+  }
+
+  function getBottomControlPadding() {
+    return width < 900 ? 110 : 0;
+  }
+
+  function initStars() {
+    const count = Math.max(90, Math.floor((width * height) / 14000));
+    state.stars = Array.from({ length: count }, () => ({
+      x: Math.random() * width,
+      y: Math.random() * height,
+      size: Math.random() * 2 + 1,
+      speed: Math.random() * 70 + 30
+    }));
+  }
+
+  function setDifficulty(level) {
+    if (level === 'easy') {
+      state.asteroidBaseSpeed = 170;
+      state.spawnRateMs = 1200;
+    } else if (level === 'hard') {
+      state.asteroidBaseSpeed = 320;
+      state.spawnRateMs = 550;
+    } else {
+      state.asteroidBaseSpeed = 230;
+      state.spawnRateMs = 850;
+    }
+  }
+
+  function resetGame() {
+    state.score = 0;
+    state.elapsedMs = 0;
+    state.asteroids = [];
+    state.lasers = [];
+    state.explosions = [];
+    state.boss = null;
+    state.bossActive = false;
+    state.bossWarningVisible = false;
+    state.bossThreshold = 3000;
+    state.laserCharges = 0;
+    state.nextLaserMilestone = 10000;
+    state.keys.left = false;
+    state.keys.right = false;
+    ship.x = width / 2 - ship.width / 2;
+    ship.y = height - Math.max(120, ship.height + 36 + getBottomControlPadding());
+    spawnTimer = 0;
+    gameEnded = false;
+    updateHud();
+  }
+
+  function startGame(level) {
+    setDifficulty(level);
+    resetGame();
+    resizeCanvas();
+    menu.style.display = 'none';
+    gameOverScreen.style.display = 'none';
+    canvas.style.display = 'block';
+    hud.style.display = 'block';
+    controls.style.display = width < 900 ? 'flex' : 'none';
+    running = true;
+    lastTime = performance.now();
+    if (animationId) cancelAnimationFrame(animationId);
+    animationId = requestAnimationFrame(loop);
+  }
+
+  function endGame() {
+    running = false;
+    gameEnded = true;
+    if (animationId) cancelAnimationFrame(animationId);
+    finalScore.textContent = `Distance: ${Math.floor(state.score)} km`;
+    gameOverScreen.style.display = 'flex';
+  }
+
+  function returnToMenu() {
+    running = false;
+    if (animationId) cancelAnimationFrame(animationId);
+    canvas.style.display = 'none';
+    hud.style.display = 'none';
+    controls.style.display = 'none';
+    gameOverScreen.style.display = 'none';
+    menu.style.display = 'flex';
+  }
+
+  function spawnAsteroid() {
+    const size = 28 + Math.random() * 46;
+    state.asteroids.push({
+      x: Math.random() * Math.max(1, width - size),
+      y: -size - 10,
+      width: size,
+      height: size,
+      hp: 2,
+      speed: state.asteroidBaseSpeed + Math.random() * 90,
+      spin: Math.random() * Math.PI * 2,
+      spinSpeed: (Math.random() - 0.5) * 2.2
+    });
+  }
+
+  function spawnBoss() {
+    state.boss = {
+      x: width / 2 - 90,
+      y: -200,
+      width: 180,
+      height: 180,
+      hp: 8,
+      speedY: 44,
+      speedX: 180,
+      direction: 1,
+      spin: 0
+    };
+    state.bossActive = true;
+    state.bossWarningVisible = true;
+  }
+
+  function spawnRockBurst(cx, cy, radius, count = 14) {
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 70 + Math.random() * 180;
+      state.explosions.push({
+        x: cx + (Math.random() - 0.5) * radius * 0.4,
+        y: cy + (Math.random() - 0.5) * radius * 0.4,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        size: 4 + Math.random() * Math.max(4, radius * 0.12),
+        rot: Math.random() * Math.PI * 2,
+        rotSpeed: (Math.random() - 0.5) * 10,
+        life: 0.65 + Math.random() * 0.35
+      });
+    }
+  }
+
+  function fireLaser() {
+    if (!running || gameEnded || state.laserCharges <= 0) return;
+    state.laserCharges -= 1;
+    state.lasers.push({
+      x: ship.x + ship.width / 2 - 3,
+      y: ship.y - 10,
+      width: 6,
+      height: 28,
+      speed: 760
+    });
+    updateHud();
+  }
+
+  function collision(a, b) {
+    return a.x < b.x + b.width &&
+      a.x + a.width > b.x &&
+      a.y < b.y + b.height &&
+      a.y + a.height > b.y;
+  }
+
+  function update(dt) {
+    if (state.keys.left) ship.x -= ship.speed * dt;
+    if (state.keys.right) ship.x += ship.speed * dt;
+    ship.x = Math.max(0, Math.min(width - ship.width, ship.x));
+
+    state.stars.forEach(s => {
+      s.y += s.speed * dt;
+      if (s.y > height) {
+        s.y = -s.size;
+        s.x = Math.random() * width;
+      }
+    });
+
+    spawnTimer += dt * 1000;
+    while (spawnTimer >= state.spawnRateMs) {
+      spawnAsteroid();
+      spawnTimer -= state.spawnRateMs;
+    }
+
+    for (const laser of state.lasers) laser.y -= laser.speed * dt;
+    state.lasers = state.lasers.filter(l => l.y + l.height > -20);
+
+    for (let i = state.explosions.length - 1; i >= 0; i--) {
+      const p = state.explosions[i];
+      p.life -= dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= 0.985;
+      p.vy = p.vy * 0.985 + 18 * dt;
+      p.rot += p.rotSpeed * dt;
+      if (p.life <= 0) state.explosions.splice(i, 1);
+    }
+
+    for (let i = state.asteroids.length - 1; i >= 0; i--) {
+      const a = state.asteroids[i];
+      a.y += a.speed * dt;
+      a.spin += a.spinSpeed * dt;
+
+      for (let j = state.lasers.length - 1; j >= 0; j--) {
+        const laser = state.lasers[j];
+        if (collision(laser, a)) {
+          state.lasers.splice(j, 1);
+          a.hp -= 1;
+          spawnRockBurst(a.x + a.width / 2, a.y + a.height / 2, a.width / 2, 6);
+          if (a.hp <= 0) {
+            spawnRockBurst(a.x + a.width / 2, a.y + a.height / 2, a.width / 2, 16);
+            state.asteroids.splice(i, 1);
+          }
+          break;
+        }
+      }
+
+      if (state.asteroids[i] && collision(ship, a)) {
+        endGame();
+        return;
+      }
+
+      if (state.asteroids[i] && a.y >= height + a.height + 20) {
+        state.asteroids.splice(i, 1);
+      }
+    }
+
+    if (state.score >= state.bossThreshold && !state.bossActive) {
+      spawnBoss();
+      state.bossThreshold += 12000;
+    }
+
+    if (state.bossActive && state.boss) {
+      const boss = state.boss;
+      boss.y += boss.speedY * dt;
+      boss.x += boss.speedX * boss.direction * dt;
+      boss.spin += 0.45 * dt;
+      state.bossWarningVisible = boss.y + boss.height > 0 && boss.y < height;
+
+      if (boss.x <= 0 || boss.x + boss.width >= width) {
+        boss.direction *= -1;
+        boss.x = Math.max(0, Math.min(width - boss.width, boss.x));
+      }
+
+      for (let j = state.lasers.length - 1; j >= 0; j--) {
+        const laser = state.lasers[j];
+        if (collision(laser, boss)) {
+          state.lasers.splice(j, 1);
+          boss.hp -= 1;
+          spawnRockBurst(boss.x + boss.width / 2, boss.y + boss.height / 2, boss.width / 2, 8);
+          if (boss.hp <= 0) {
+            spawnRockBurst(boss.x + boss.width / 2, boss.y + boss.height / 2, boss.width / 2, 28);
+            state.boss = null;
+            state.bossActive = false;
+            state.bossWarningVisible = false;
+          }
+          break;
+        }
+      }
+
+      if (state.boss && collision(ship, boss)) {
+        endGame();
+        return;
+      }
+
+      if (state.boss && boss.y > height + boss.height + 10) {
+        state.boss = null;
+        state.bossActive = false;
+        state.bossWarningVisible = false;
+      }
+    }
+
+    state.elapsedMs += dt * 1000;
+    state.score += dt * 300;
+    while (state.score >= state.nextLaserMilestone) {
+      state.laserCharges += 1;
+      state.nextLaserMilestone += 10000;
+    }
+    updateHud();
+  }
+
+  function updateHud() {
+    hud.textContent = `Distance: ${Math.floor(state.score)} km | Laser: ${state.laserCharges}`;
+  }
+
+  function drawShip() {
+    const x = ship.x;
+    const y = ship.y;
+    const w = ship.width;
+    const h = ship.height;
+
+    ctx.save();
+    ctx.translate(x + w / 2, y + h / 2);
+    ctx.beginPath();
+    ctx.moveTo(0, -h * 0.52);
+    ctx.lineTo(w * 0.34, h * 0.22);
+    ctx.lineTo(w * 0.18, h * 0.16);
+    ctx.lineTo(w * 0.12, h * 0.48);
+    ctx.lineTo(0, h * 0.26);
+    ctx.lineTo(-w * 0.12, h * 0.48);
+    ctx.lineTo(-w * 0.18, h * 0.16);
+    ctx.lineTo(-w * 0.34, h * 0.22);
+    ctx.closePath();
+    ctx.fillStyle = '#cbd5e1';
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(0, -h * 0.34);
+    ctx.lineTo(w * 0.09, -h * 0.02);
+    ctx.lineTo(0, h * 0.08);
+    ctx.lineTo(-w * 0.09, -h * 0.02);
+    ctx.closePath();
+    ctx.fillStyle = '#60a5fa';
+    ctx.fill();
+
+    ctx.fillStyle = '#f97316';
+    ctx.beginPath();
+    ctx.moveTo(-w * 0.08, h * 0.28);
+    ctx.lineTo(0, h * 0.52 + Math.random() * 8);
+    ctx.lineTo(w * 0.08, h * 0.28);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawAsteroid(a, isBoss = false) {
+    const r = a.width / 2;
+    ctx.save();
+    ctx.translate(a.x + r, a.y + r);
+    ctx.rotate(a.spin || 0);
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const angle = (Math.PI * 2 * i) / 8;
+      const variance = isBoss ? 0.82 + (i % 2) * 0.22 : 0.78 + Math.sin(i * 1.7) * 0.18;
+      const px = Math.cos(angle) * r * variance;
+      const py = Math.sin(angle) * r * variance;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fillStyle = isBoss ? '#5b5b5b' : '#8b8b8b';
+    ctx.fill();
+    ctx.strokeStyle = isBoss ? '#c62828' : '#5f5f5f';
+    ctx.lineWidth = isBoss ? 4 : 2;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, width, height);
+
+    ctx.fillStyle = '#ffffff';
+    for (const s of state.stars) {
+      ctx.globalAlpha = 0.7;
+      ctx.fillRect(s.x, s.y, s.size, s.size);
+    }
+    ctx.globalAlpha = 1;
+
+    for (const a of state.asteroids) drawAsteroid(a);
+    if (state.bossActive && state.boss) {
+      drawAsteroid(state.boss, true);
+      if (state.bossWarningVisible) {
+        ctx.fillStyle = '#ff6b6b';
+        ctx.font = 'bold 22px Arial';
+        ctx.fillText('BOSS ASTEROID', Math.max(16, width / 2 - 85), 90);
+      }
+    }
+
+    for (const laser of state.lasers) {
+      ctx.save();
+      const grad = ctx.createLinearGradient(laser.x, laser.y, laser.x, laser.y + laser.height);
+      grad.addColorStop(0, 'rgba(255,255,255,0.95)');
+      grad.addColorStop(0.4, 'rgba(120,220,255,1)');
+      grad.addColorStop(1, 'rgba(60,130,255,0.2)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(laser.x, laser.y, laser.width, laser.height);
+      ctx.restore();
+    }
+
+    for (const p of state.explosions) {
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.rot);
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.fillStyle = '#8f8f8f';
+      ctx.beginPath();
+      ctx.moveTo(-p.size * 0.55, -p.size * 0.2);
+      ctx.lineTo(-p.size * 0.1, -p.size * 0.55);
+      ctx.lineTo(p.size * 0.5, -p.size * 0.15);
+      ctx.lineTo(p.size * 0.2, p.size * 0.55);
+      ctx.lineTo(-p.size * 0.45, p.size * 0.35);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#5a5a5a';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.restore();
+    }
+    drawShip();
+  }
+
+  function loop(now) {
+    if (!running) return;
+    const dt = Math.min(0.033, (now - lastTime) / 1000 || 0);
+    lastTime = now;
+    update(dt);
+    if (!gameEnded) {
+      draw();
+      animationId = requestAnimationFrame(loop);
+    }
+  }
+
+  function setControlState(side, pressed) {
+    state.keys[side] = pressed;
+  }
+
+  function bindHoldButton(element, side) {
+    const start = (e) => {
+      e.preventDefault();
+      setControlState(side, true);
+    };
+    const end = (e) => {
+      e.preventDefault();
+      setControlState(side, false);
+    };
+    ['pointerdown', 'touchstart'].forEach(type => element.addEventListener(type, start, { passive: false }));
+    ['pointerup', 'pointercancel', 'pointerleave', 'touchend', 'touchcancel'].forEach(type => element.addEventListener(type, end, { passive: false }));
+  }
+
+  document.querySelectorAll('[data-level]').forEach(btn => {
+    btn.addEventListener('click', () => startGame(btn.dataset.level));
+  });
+
+  document.getElementById('restartBtn').addEventListener('click', () => startGame('normal'));
+  document.getElementById('menuBtn').addEventListener('click', returnToMenu);
+
+  bindHoldButton(document.getElementById('leftBtn'), 'left');
+  bindHoldButton(document.getElementById('rightBtn'), 'right');
+  document.getElementById('shootBtn').addEventListener('click', (e) => { e.preventDefault(); fireLaser(); });
+  document.getElementById('shootBtn').addEventListener('pointerdown', (e) => { e.preventDefault(); fireLaser(); }, { passive: false });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowLeft') state.keys.left = true;
+    if (e.key === 'ArrowRight') state.keys.right = true;
+    if (e.key === ' ' || e.key.toLowerCase() === 'z') fireLaser();
+  });
+  document.addEventListener('keyup', (e) => {
+    if (e.key === 'ArrowLeft') state.keys.left = false;
+    if (e.key === 'ArrowRight') state.keys.right = false;
+  });
+
+  let dragActive = false;
+  canvas.addEventListener('pointerdown', (e) => {
+    dragActive = true;
+    const rect = canvas.getBoundingClientRect();
+    ship.x = e.clientX - rect.left - ship.width / 2;
+    ship.x = Math.max(0, Math.min(width - ship.width, ship.x));
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!dragActive) return;
+    const rect = canvas.getBoundingClientRect();
+    ship.x = e.clientX - rect.left - ship.width / 2;
+    ship.x = Math.max(0, Math.min(width - ship.width, ship.x));
+  });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(type => canvas.addEventListener(type, () => {
+    dragActive = false;
+  }));
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && running) {
+      running = false;
+      if (animationId) cancelAnimationFrame(animationId);
+    } else if (!document.hidden && !gameEnded && canvas.style.display === 'block') {
+      running = true;
+      lastTime = performance.now();
+      animationId = requestAnimationFrame(loop);
+    }
+  });
+
+  window.addEventListener('resize', resizeCanvas);
+  window.addEventListener('orientationchange', () => setTimeout(resizeCanvas, 150));
+
+  resizeCanvas();
+})();
+</script>
+</body>
+</html>
